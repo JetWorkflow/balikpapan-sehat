@@ -1,4 +1,5 @@
-fastapi[all]
+flask
 langchain
 langchain_groq
 python-dotenv
+gunicorn
