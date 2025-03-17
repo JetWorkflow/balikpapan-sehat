@@ -38,6 +38,28 @@ def get_greeting_time():
     else:
         return "malam"
 
+schedule_prompt_template = """
+Anda adalah asisten AI yang membantu mencari jadwal dokter sesuai permintaan user.
+
+**Riwayat percakapan sebelumnya:**
+{chat_history}
+
+**Pesan terbaru dari user:**
+User: {user_query}
+
+**Instruksi:**
+1. Jika user hanya bertanya "jadwal dokter", minta mereka untuk menyebutkan nama dokter atau spesialisasi.
+2. Jika user menyebutkan spesialisasi atau nama dokter, berikan jadwal yang relevan dari data berikut:
+
+{doctor_data_str}
+
+3. Jika dokter atau spesialisasi tidak ditemukan, beri tahu user dengan sopan.
+"""
+
+schedule_prompt = PromptTemplate(
+    input_variables=["chat_history", "user_query", "doctor_data_str"],
+    template=schedule_prompt_template
+)
 
 # === 2. Intent Classification Chain (Global) ===
 intent_prompt_template = """
@@ -261,7 +283,13 @@ def process_user_query(user_id: str, message: str) -> str:
             response = booking_chain_instance.run(user_query=message)
 
         elif intent == "information":
-            response = f"Berikut daftar dokter yang tersedia:\n{doctor_data_str}"
+            schedule_chain_instance = LLMChain(llm=llm, prompt=schedule_prompt, memory=user_global_memory[user_id])
+            response = schedule_chain_instance.run(
+                chat_history=user_global_memory[user_id].buffer, 
+                user_query=message,
+                doctor_data_str=doctor_data_str
+            )
+            return response
 
         elif intent == "greetings":
             # Gunakan LLM untuk membuat salam yang lebih personal
