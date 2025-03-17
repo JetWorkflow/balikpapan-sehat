@@ -6,6 +6,7 @@ from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 import os
 import json
+from datetime import datetime
 
 # === 1. Setup Environment & Inisialisasi Model ===
 load_dotenv()
@@ -24,6 +25,19 @@ llm = ChatGroq(
 user_symptom_memory = {}  # Memory untuk menyimpan gejala user
 user_global_memory = {}  # Memory percakapan umum
 user_active_pipeline = {}  # Menyimpan status pipeline user
+
+
+def get_greeting_time():
+    hour = datetime.now().hour
+    if hour < 12:
+        return "pagi"
+    elif hour < 15:
+        return "siang"
+    elif hour < 18:
+        return "sore"
+    else:
+        return "malam"
+
 
 # === 2. Intent Classification Chain (Global) ===
 intent_prompt_template = """
@@ -69,8 +83,21 @@ User: {user_query}
 - Jika user menyebutkan nama: "Halo, [Nama]! Selamat [waktu], bagaimana saya bisa membantu Anda hari ini?"
 - Jika user tidak menyebutkan nama: "Selamat [waktu]! Bagaimana saya bisa membantu Anda hari ini?"
 """
+
+
+# Prompt untuk model LLM
+greetings_prompt_template = """
+Anda adalah asisten AI yang ramah. Berdasarkan pesan user, buatlah salam yang langsung dan natural.
+
+**Pesan terbaru dari user:**
+User: {user_query}
+
+**Jawaban yang diharapkan:**
+- Jika user menyebutkan nama: "Halo, [Nama]! Selamat {greeting_time}, bagaimana saya bisa membantu Anda hari ini?"
+- Jika user tidak menyebutkan nama: "Selamat {greeting_time}! Bagaimana saya bisa membantu Anda hari ini?"
+"""
 greetings_prompt = PromptTemplate(
-    input_variables=["chat_history", "user_query"],
+    input_variables=["chat_history", "user_query", "greeting_time"],
     template=greetings_prompt_template
 )
 
@@ -238,8 +265,9 @@ def process_user_query(user_id: str, message: str) -> str:
 
         elif intent == "greetings":
             # Gunakan LLM untuk membuat salam yang lebih personal
+            greeting_time = get_greeting_time()
             greetings_chain_instance = LLMChain(llm=llm, prompt=greetings_prompt, memory=user_global_memory[user_id])
-            response = greetings_chain_instance.run(chat_history=user_global_memory[user_id].buffer, user_query=message)
+            response = greetings_chain_instance.run(chat_history=user_global_memory[user_id].buffer, user_query=message, greeting_time=greeting_time)
 
             # Cek apakah user menyebutkan nama mereka
             for word in message.split():
