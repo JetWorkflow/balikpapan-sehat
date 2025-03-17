@@ -5,6 +5,7 @@ from langchain.chains import LLMChain
 from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 import os
+import json
 
 # === 1. Setup Environment & Inisialisasi Model ===
 load_dotenv()
@@ -19,85 +20,155 @@ llm = ChatGroq(
     max_retries=2
 )
 
-# === Global Dictionaries untuk Menyimpan Memory & Pipeline per User ===
-user_booking_memory = {}    # Memory khusus untuk pipeline booking per user
-user_global_memory = {}     # Memory global untuk menyimpan riwayat percakapan per user
-user_active_pipeline = {}   # Menyimpan status pipeline, misalnya "booking" atau None per user
+# === Global Dictionaries untuk Memory & Pipeline per User ===
+user_symptom_memory = {}  # Memory untuk menyimpan gejala user
+user_global_memory = {}  # Memory percakapan umum
+user_active_pipeline = {}  # Menyimpan status pipeline user
 
 # === 2. Intent Classification Chain (Global) ===
 intent_prompt_template = """
+Percakapan sebelumnya:
+{chat_history}
+
 User message: {user_query}
 
-Klasifikasikan pesan tersebut ke dalam salah satu kategori berikut:
+Klasifikasikan pesan user ke dalam salah satu kategori berikut:
+- symptom_check: jika user menyebutkan gejala atau memberikan respon terkait gejala.
+- booking: jika user ingin membuat janji temu dengan dokter.
+- information: jika user meminta informasi tentang dokter atau layanan.
 - greetings: jika user menyapa.
 - goodbye: jika user mengucapkan selamat tinggal.
-- information: jika user meminta informasi umum tentang dokter atau jadwal.
-- booking: jika user ingin melakukan booking appointment dokter.
-- out of topic: jika pesan tidak terkait dengan layanan dokter.
+- out of topic: jika pesan tidak terkait dengan layanan medis.
+
+Jika user hanya menjawab dengan satu kata seperti "ya", "tidak", "mungkin", tetap anggap sebagai bagian dari "symptom_check".
 
 Jawab hanya dengan salah satu kategori di atas.
 """
 intent_prompt = PromptTemplate(
-    input_variables=["user_query"],
+    input_variables=["chat_history", "user_query"],
     template=intent_prompt_template
 )
+
 intent_chain = LLMChain(llm=llm, prompt=intent_prompt)
 
+greetings_prompt_template = """
+Anda adalah asisten AI yang ramah. Berdasarkan pesan user, buatlah salam yang lebih personal.
+
+**Riwayat percakapan sebelumnya:**
+{chat_history}
+
+**Pesan terbaru dari user:**
+User: {user_query}
+
+**Instruksi:**
+1. Jika user menyebutkan nama mereka (misalnya: "Halo, saya Faridan"), ingatlah nama tersebut dan gunakan dalam respons Anda.
+2. Jika user menyebutkan waktu (pagi/siang/sore/malam), sesuaikan salam dengan waktu tersebut.
+3. Gunakan gaya bahasa yang ramah dan profesional.
+
+**Jawaban harus dalam format berikut:**
+- Jika user menyebutkan nama: "Halo, [Nama]! Selamat [waktu], bagaimana saya bisa membantu Anda hari ini?"
+- Jika user tidak menyebutkan nama: "Selamat [waktu]! Bagaimana saya bisa membantu Anda hari ini?"
+"""
+greetings_prompt = PromptTemplate(
+    input_variables=["chat_history", "user_query"],
+    template=greetings_prompt_template
+)
+
+goodbye_prompt_template = """
+Anda adalah asisten AI yang ramah. Berdasarkan pesan user, buatlah ucapan perpisahan yang lebih personal.
+
+**Riwayat percakapan sebelumnya:**
+{chat_history}
+
+**Pesan terbaru dari user:**
+User: {user_query}
+
+**Instruksi:**
+1. Jika user menyebutkan nama, gunakan nama tersebut dalam salam perpisahan.
+2. Gunakan gaya bahasa yang ramah dan profesional.
+
+**Jawaban harus dalam format berikut:**
+- Jika user menyebutkan nama: "Terima kasih, [Nama]! Semoga hari Anda menyenangkan. Sampai jumpa lagi!"
+- Jika user tidak menyebutkan nama: "Terima kasih telah menghubungi kami. Semoga sehat selalu! Sampai jumpa!"
+"""
+goodbye_prompt = PromptTemplate(
+    input_variables=["chat_history", "user_query"],
+    template=goodbye_prompt_template
+)
+
 # === 3. Dummy Data Dokter ===
-doctors = [
-    {"name": "Dr. John Smith", "specialist": "Cardiology", "schedule": "Monday 9-12, Wednesday 14-18"},
-    {"name": "Dr. Emily Rose", "specialist": "Dermatology", "schedule": "Tuesday 10-14, Thursday 9-12"},
-    {"name": "Dr. Alex Green", "specialist": "Pediatrics", "schedule": "Friday 10-16"}
-]
+def load_doctors():
+    with open("doctors.json", "r", encoding="utf-8") as file:
+        return json.load(file)
+
+doctors = load_doctors()
+
 doctor_data_str = "\n".join([
     f"Name: {doc['name']}, Specialist: {doc['specialist']}, Schedule: {doc['schedule']}"
     for doc in doctors
 ])
 
-# === 4. Chain untuk Informasi Dokter (tanpa memory) ===
-doctor_prompt_template = """
-Anda adalah chatbot yang membantu manajemen dokter. Berikut adalah daftar dokter beserta detailnya:
+# === 4. Prompt Diagnosa Gejala dengan Follow-up Singkat ===
+diagnosis_prompt_template = f"""
+Anda adalah asisten medis AI. Analisis gejala user secara bertahap sebelum memberikan kesimpulan.
 
-{doctor_data}
+**Riwayat percakapan sebelumnya:**
+{{chat_history}}
 
-User: {user_query}
-Chatbot:"""
-doctor_prompt = PromptTemplate(
-    input_variables=["doctor_data", "user_query"],
-    template=doctor_prompt_template
+**Pesan terbaru:**
+User: {{user_query}}
+
+**Instruksi:**
+1. Jika ini adalah pertanyaan pertama user tentang gejala, JANGAN langsung memberikan diagnosis atau rekomendasi dokter. Sebagai gantinya, ajukan satu pertanyaan tambahan untuk memahami lebih lanjut gejalanya.
+2. Jika user sudah memberikan jawaban tambahan atau gejala cukup jelas, baru berikan kemungkinan penyakit dan spesialisasi dokter yang sesuai.
+3. Hindari memberikan saran medis final, hanya rekomendasi awal.
+
+**Jawaban harus dalam format berikut:**
+- Kemungkinan penyakit: [sebutkan kemungkinan penyakit]
+- Spesialis yang direkomendasikan: [sebutkan spesialis]
+- Rekomendasi Dokter Spesialis yang ada di bawah ini berdasarkan Spesialis yang sesuai.
+
+{doctor_data_str}
+
+"""
+
+
+
+diagnosis_prompt = PromptTemplate(
+    input_variables=["chat_history", "user_query"],
+    template=diagnosis_prompt_template
 )
-doctor_chain = LLMChain(llm=llm, prompt=doctor_prompt)
 
 # === 5. Booking Appointment Chain (dengan Conversation Memory) ===
 booking_prompt_template = f"""
 Percakapan sebelumnya:
 {{chat_history}}
 
-Anda adalah asisten booking appointment dokter. Ikuti langkah-langkah berikut untuk memproses booking:
-1. Evaluasi detail permintaan booking berdasarkan percakapan sebelumnya dan pesan user.
-2. Periksa apakah waktu yang diminta tersedia berdasarkan jadwal dokter.
-3. Jika waktu tidak tersedia, sarankan waktu alternatif yang tersedia.
-4. Jika detail booking sudah lengkap (nama dokter, tanggal, dan waktu), tanyakan konfirmasi booking dengan menanyakan: "Apakah Anda ingin mengonfirmasi booking dengan detail tersebut?"
-5. Buat respons yang ringkas dan jelas.
+Anda adalah asisten booking dokter. Pastikan detail yang diperlukan lengkap:
+- Nama dokter
+- Tanggal & waktu
+
+Jika user belum memberikan semua informasi, tanyakan secara singkat.
 
 Berikut daftar dokter:
 {doctor_data_str}
 
 User: {{user_query}}
 
-Chatbot:"""
+Chatbot:
+"""
 booking_prompt = PromptTemplate(
     input_variables=["chat_history", "user_query"],
     template=booking_prompt_template
 )
 
-# === 6. Membuat API dengan Flask ===
+# === 6. Flask API ===
 app = Flask(__name__)
 
 def process_user_query(user_id: str, message: str) -> str:
-    # Jika pesan "/reset", reset memory untuk user tersebut
+    # Reset memory jika user memasukkan "/reset"
     if message.strip() == "/reset":
-        user_booking_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
+        user_symptom_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
         user_global_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
         user_active_pipeline[user_id] = None
         return "Memory telah direset."
@@ -105,36 +176,94 @@ def process_user_query(user_id: str, message: str) -> str:
     # Pastikan setiap user memiliki memory dan status pipeline
     if user_id not in user_active_pipeline:
         user_active_pipeline[user_id] = None
-    if user_id not in user_booking_memory:
-        user_booking_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
+    if user_id not in user_symptom_memory:
+        user_symptom_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
     if user_id not in user_global_memory:
         user_global_memory[user_id] = ConversationBufferMemory(memory_key="chat_history", input_key="user_query")
 
-    # Jika user sudah berada dalam pipeline booking, langsung proses booking
+    # Jika user dalam pipeline booking, langsung proses booking
     if user_active_pipeline[user_id] == "booking":
-        booking_chain_instance = LLMChain(llm=llm, prompt=booking_prompt, memory=user_booking_memory[user_id])
+        booking_chain_instance = LLMChain(llm=llm, prompt=booking_prompt, memory=user_global_memory[user_id])
         response = booking_chain_instance.run(user_query=message)
-        # Contoh: jika respons mengandung "booking dikonfirmasi", reset status pipeline
         if "booking dikonfirmasi" in response.lower():
-            user_active_pipeline[user_id] = None
+            user_active_pipeline[user_id] = None  # Reset pipeline setelah booking selesai
     else:
-        # Lakukan intent classification
-        intent = intent_chain.run(user_query=message).strip().lower()
+        # Deteksi intent user
+        intent = intent_chain.run(chat_history=user_symptom_memory[user_id].buffer,user_query=message).strip().lower()
         print(f"User {user_id} detected intent: {intent}")
-        if intent == "booking":
-            user_active_pipeline[user_id] = "booking"
-            booking_chain_instance = LLMChain(llm=llm, prompt=booking_prompt, memory=user_booking_memory[user_id])
-            response = booking_chain_instance.run(user_query=message)
-        elif intent == "information":
-            response = doctor_chain.run(doctor_data=doctor_data_str, user_query=message)
-        elif intent == "greetings":
-            response = "Halo, selamat datang di layanan dokter kami! Bagaimana saya dapat membantu Anda hari ini?"
-        elif intent == "goodbye":
-            response = "Terima kasih telah menghubungi kami. Semoga hari Anda menyenangkan!"
-        else:
-            response = "Maaf, pesan Anda tidak terkait dengan layanan dokter kami. Silakan ajukan pertanyaan lain yang relevan."
 
-    # Simpan riwayat percakapan global untuk user
+        if intent == "symptom_check":
+            # Simpan gejala dalam memory
+            user_symptom_memory[user_id].save_context({"user_query": message}, {"response": ""})
+
+            # Cek apakah ini pertama kali user menyebutkan gejala
+            previous_messages = user_symptom_memory[user_id].buffer
+            if len(previous_messages) == 0:
+                # Jika tidak ada riwayat sebelumnya, chatbot harus bertanya dulu
+                diagnosis_prompt_initial = """
+                Anda adalah asisten medis AI. User baru pertama kali menyebutkan gejala. Jangan langsung berikan diagnosis atau rekomendasi dokter.
+                
+                **Riwayat percakapan sebelumnya:**
+                {chat_history}
+                
+                **Pesan terbaru:**
+                User: {user_query}
+
+                **Instruksi:**
+                - Ajukan satu pertanyaan tambahan untuk memahami lebih lanjut gejalanya.
+                - Hindari memberikan kesimpulan di tahap ini.
+                """
+                initial_diagnosis_prompt = PromptTemplate(
+                    input_variables=["chat_history", "user_query"],
+                    template=diagnosis_prompt_initial
+                )
+                diagnosis_chain_instance = LLMChain(llm=llm, prompt=initial_diagnosis_prompt, memory=user_symptom_memory[user_id])
+                response = diagnosis_chain_instance.run(chat_history=user_symptom_memory[user_id].buffer, user_query=message)
+            
+            else:
+                # Jika sudah ada percakapan sebelumnya, lanjutkan ke diagnosis
+                diagnosis_chain_instance = LLMChain(llm=llm, prompt=diagnosis_prompt, memory=user_symptom_memory[user_id])
+                response = diagnosis_chain_instance.run(
+                    chat_history=user_symptom_memory[user_id].buffer, 
+                    user_query=message
+                )
+
+        elif intent == "booking":
+            user_active_pipeline[user_id] = "booking"
+            booking_chain_instance = LLMChain(llm=llm, prompt=booking_prompt, memory=user_global_memory[user_id])
+            response = booking_chain_instance.run(user_query=message)
+
+        elif intent == "information":
+            response = f"Berikut daftar dokter yang tersedia:\n{doctor_data_str}"
+
+        elif intent == "greetings":
+            # Gunakan LLM untuk membuat salam yang lebih personal
+            greetings_chain_instance = LLMChain(llm=llm, prompt=greetings_prompt, memory=user_global_memory[user_id])
+            response = greetings_chain_instance.run(chat_history=user_global_memory[user_id].buffer, user_query=message)
+
+            # Cek apakah user menyebutkan nama mereka
+            for word in message.split():
+                if word.lower() in ["saya", "nama", "aku"]:
+                    user_name = message.split()[-1]  # Ambil kata terakhir sebagai nama (bisa ditingkatkan dengan NLP)
+                    user_global_memory[user_id].save_context({"user_query": message}, {"response": f"Nama user: {user_name}"})
+                    response = response.replace("[Nama]", user_name)  # Gunakan nama dalam respons
+
+        elif intent == "goodbye":
+            # Gunakan LLM untuk membuat ucapan perpisahan yang lebih personal
+            goodbye_chain_instance = LLMChain(llm=llm, prompt=goodbye_prompt, memory=user_global_memory[user_id])
+            response = goodbye_chain_instance.run(chat_history=user_global_memory[user_id].buffer, user_query=message)
+
+            # Cek apakah user sudah memberikan nama sebelumnya
+            stored_name = user_global_memory[user_id].buffer
+            if "Nama user:" in stored_name:
+                user_name = stored_name.split("Nama user:")[-1].strip()
+                response = response.replace("[Nama]", user_name)
+
+
+        else:
+            response = "Maaf, saya tidak mengerti. Bisa jelaskan lebih lanjut?"
+
+    # Simpan riwayat percakapan user
     user_global_memory[user_id].save_context({"user_query": message}, {"response": response})
     return response
 
@@ -143,8 +272,10 @@ def chat_endpoint():
     data = request.get_json()
     user_id = data.get("user_id")
     message = data.get("message")
+
     if not user_id or not message:
         return jsonify({"response": "user_id dan message harus disertakan."}), 400
+
     response = process_user_query(user_id, message)
     return jsonify({"response": response})
 
